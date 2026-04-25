@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ACORD PDF Editor Pro (Fixed)</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#eef2f7;margin:0;padding:20px}
+.panel{background:#fff;padding:20px;border-radius:16px;box-shadow:0 8px 20px rgba(0,0,0,.08);margin-bottom:20px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap}
+button,input{padding:10px;border-radius:8px;border:1px solid #ccc}
+button{cursor:pointer;background:#2563eb;color:#fff;border:none}
+#container{position:relative;display:inline-block;background:#fff}
+canvas{display:block;border:1px solid #ddd}
+.annotation{
+  position:absolute;
+  font:14px monospace;
+  color:#000;
+  white-space:nowrap;
+  cursor:move;
+  user-select:none;
+}
+.editor-input{
+  position:absolute;
+  font:14px monospace;
+  padding:2px 4px;
+  border:2px solid #2563eb;
+  z-index:100;
+}
+</style>
+</head>
+<body>
+
+<div class="panel">
+  <div class="toolbar">
+    <input type="file" id="fileInput" accept="application/pdf" />
+    <button onclick="downloadPDF()">Download PDF</button>
+    <button onclick="printPDF()">Print</button>
+    <button onclick="clearAnnotations()">Clear</button>
+  </div>
+</div>
+
+<div id="container">
+  <canvas id="pdfCanvas"></canvas>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+<script src="https://unpkg.com/pdf-lib/dist/pdf-lib.min.js"></script>
+<script>
+const canvas = document.getElementById('pdfCanvas');
+const ctx = canvas.getContext('2d');
+const container = document.getElementById('container');
+
+let pdfFile = null;
+let pdfDoc = null;
+let page = null;
+let scale = 1.5;
+let annotations = [];
+
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+async function renderPDF(file){
+  const buffer = await file.arrayBuffer();
+  pdfDoc = await pdfjsLib.getDocument({data:buffer}).promise;
+  page = await pdfDoc.getPage(1);
+
+  const viewport = page.getViewport({scale});
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  container.style.width = viewport.width + 'px';
+  container.style.height = viewport.height + 'px';
+
+  await page.render({canvasContext:ctx, viewport}).promise;
+}
+
+function createInput(x,y,text='',existing=null){
+  removeInput();
+  const input = document.createElement('input');
+  input.className='editor-input';
+  input.style.left=x+'px';
+  input.style.top=y+'px';
+  input.value=text;
+  container.appendChild(input);
+  input.focus();
+
+  input.onblur=()=>{
+    const value=input.value.trim();
+    if(value){
+      if(existing){
+        existing.text=value;
+        existing.el.innerText=value;
+      } else {
+        createAnnotation(value,x,y);
+      }
+    }
+    input.remove();
+  };
+
+  input.onkeydown=(e)=>{
+    if(e.key==='Enter') input.blur();
+  };
+}
+
+function removeInput(){
+  const old=document.querySelector('.editor-input');
+  if(old) old.remove();
+}
+
+function createAnnotation(text,x,y){
+  const el=document.createElement('div');
+  el.className='annotation';
+  el.innerText=text;
+  el.style.left=x+'px';
+  el.style.top=y+'px';
+  container.appendChild(el);
+
+  const item={text,x,y,el};
+  annotations.push(item);
+  attachDrag(item);
+}
+
+function attachDrag(item){
+  item.el.onmousedown=(e)=>{
+    e.stopPropagation();
+    const offsetX=e.offsetX;
+    const offsetY=e.offsetY;
+
+    function move(ev){
+      const rect=canvas.getBoundingClientRect();
+      item.x=ev.clientX-rect.left-offsetX;
+      item.y=ev.clientY-rect.top-offsetY;
+      item.el.style.left=item.x+'px';
+      item.el.style.top=item.y+'px';
+    }
+
+    function up(){
+      document.removeEventListener('mousemove',move);
+      document.removeEventListener('mouseup',up);
+    }
+
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',up);
+  };
+
+  item.el.ondblclick=(e)=>{
+    e.stopPropagation();
+    createInput(item.x,item.y,item.text,item);
+  };
+}
+
+canvas.addEventListener('click',(e)=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+  createInput(x,y);
+});
+
+async function downloadPDF(){
+  if(!pdfFile) return alert('Upload PDF first');
+
+  const {PDFDocument, rgb, StandardFonts} = PDFLib;
+  const bytes = await pdfFile.arrayBuffer();
+  const pdf = await PDFDocument.load(bytes);
+  const page = pdf.getPages()[0];
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+
+  const {height} = page.getSize();
+
+  annotations.forEach(item=>{
+    const pdfX = item.x / scale;
+    const pdfY = height - (item.y / scale) - 10;
+
+    page.drawText(item.text, {
+      x: pdfX,
+      y: pdfY,
+      size: 12,
+      font,
+      color: rgb(0,0,0)
+    });
+  });
+
+  const pdfBytes = await pdf.save();
+  const blob = new Blob([pdfBytes], {type:'application/pdf'});
+  const link=document.createElement('a');
+  link.href=URL.createObjectURL(blob);
+  link.download='edited.pdf';
+  link.click();
+}
+
+function printPDF(){
+  const printCanvas=document.createElement('canvas');
+  printCanvas.width=canvas.width;
+  printCanvas.height=canvas.height;
+  const pctx=printCanvas.getContext('2d');
+
+  pctx.drawImage(canvas,0,0);
+
+  // EXACT SAME COORDINATES AS SCREEN
+  pctx.font='14px monospace';
+  pctx.fillStyle='black';
+  annotations.forEach(item=>{
+    pctx.fillText(item.text,item.x,item.y+14);
+  });
+
+  const win=window.open('');
+  win.document.write(`
+    <html>
+      <body style="margin:0">
+        <img src="${printCanvas.toDataURL()}" style="width:100%" />
+        <script>
+          window.onload=function(){window.print();}
+        <\/script>
+      </body>
+    </html>
+  `);
+}
+
+function clearAnnotations(){
+  annotations.forEach(a=>a.el.remove());
+  annotations=[];
+}
+
+document.getElementById('fileInput').addEventListener('change', async (e)=>{
+  pdfFile=e.target.files[0];
+  clearAnnotations();
+  await renderPDF(pdfFile);
+});
+</script>
+</body>
+</html>
